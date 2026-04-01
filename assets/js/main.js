@@ -761,6 +761,8 @@
 
     // Stock Handler
     CFI.stock = {
+        _calculationsInitialized: false,
+
         init: function() {
             const container = $('#cfi-stock-form');
             if (!container.length) return;
@@ -822,6 +824,10 @@
         },
 
         initCalculations: function() {
+            // Only bind delegated handlers once to avoid duplicates on re-render
+            if (this._calculationsInitialized) return;
+            this._calculationsInitialized = true;
+
             $(document).on('input', '.cfi-to-packing', function() {
                 const raw = CFI.utils.parseNumber($(this).val());
                 $(this).val(CFI.utils.formatNumber(raw));

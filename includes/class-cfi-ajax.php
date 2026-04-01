@@ -659,17 +659,17 @@ class CFI_Ajax {
             $order_amount = floatval($order_to_delete->grand_total);
             
             if ($order_to_delete->payment_method === 'credit') {
-                $new_credit_total = max(0, $financial_record->credit_total - $order_amount);
+                $new_credit_total = max(0, floatval($financial_record->credit_total) - $order_amount);
                 $wpdb->update(
                     $financial_table,
                     array('credit_total' => $new_credit_total),
                     array('id' => $financial_record->id),
-                    array('%d'),
+                    array('%f'),
                     array('%d')
                 );
             } else {
-                $new_money_supplied = max(0, $financial_record->money_supplied - $order_amount);
-                $new_cash_left = $financial_record->old_cash + $new_money_supplied - $financial_record->cash_to_bank - $financial_record->expenses_total;
+                $new_money_supplied = max(0, floatval($financial_record->money_supplied) - $order_amount);
+                $new_cash_left = floatval($financial_record->old_cash) + $new_money_supplied - floatval($financial_record->cash_to_bank) - floatval($financial_record->expenses_total);
                 $wpdb->update(
                     $financial_table,
                     array(
@@ -677,7 +677,7 @@ class CFI_Ajax {
                         'cash_left' => $new_cash_left
                     ),
                     array('id' => $financial_record->id),
-                    array('%d', '%d'),
+                    array('%f', '%f'),
                     array('%d')
                 );
             }

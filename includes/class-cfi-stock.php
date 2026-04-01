@@ -66,12 +66,164 @@ class CFI_Stock {
     }
     
     /**
+     * Recalculate stock values for a product on a given date from source tables.
+     * This is the single source of truth — it derives import_qty, cash_supply,
+     * credit_supply, not_supplied, supplied_today, and from_packing_store from
+     * their respective tables, then recalculates closing.
+     * 
+     * to_packing_store is user-entered on the stock page, so it is NOT overwritten.
+     * opening is derived from the previous day's closing.
+     *
+     * @param int    $product_id The product ID.
+     * @param string $date       The date (Y-m-d).
+     * @return bool Whether any values were corrected.
+     */
+    public static function recalculate_from_sources($product_id, $date) {
+        global $wpdb;
+        $table_stock      = CFI_Database::get_table('stock');
+        $table_orders     = CFI_Database::get_table('orders');
+        $table_items      = CFI_Database::get_table('order_items');
+        $table_imports    = CFI_Database::get_table('imports');
+        $table_ns         = CFI_Database::get_table('not_supplied');
+        $table_st         = CFI_Database::get_table('supplied_today');
+        $table_packing    = CFI_Database::get_table('packing_store');
+        
+        // Get current stock record
+        $record = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT * FROM $table_stock WHERE product_id = %d AND record_date = %s",
+                $product_id,
+                $date
+            )
+        );
+        
+        if (!$record) {
+            return false;
+        }
+        
+        // 1. Opening: previous day's closing
+        $prev_closing = $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT closing FROM $table_stock WHERE product_id = %d AND record_date < %s ORDER BY record_date DESC LIMIT 1",
+                $product_id,
+                $date
+            )
+        );
+        $expected_opening = $prev_closing !== null ? floatval($prev_closing) : 0;
+        
+        // 2. Import qty from imports table
+        $expected_import = floatval($wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COALESCE(SUM(quantity), 0) FROM $table_imports WHERE product_id = %d AND import_date = %s",
+                $product_id,
+                $date
+            )
+        ));
+        
+        // 3. Cash supply from cash orders
+        $expected_cash = floatval($wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COALESCE(SUM(oi.quantity), 0)
+                 FROM $table_items oi
+                 JOIN $table_orders o ON oi.order_id = o.id
+                 WHERE oi.product_id = %d AND o.order_date = %s AND o.order_type = 'cash'",
+                $product_id,
+                $date
+            )
+        ));
+        
+        // 4. Credit supply from credit orders
+        $expected_credit = floatval($wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COALESCE(SUM(oi.quantity), 0)
+                 FROM $table_items oi
+                 JOIN $table_orders o ON oi.order_id = o.id
+                 WHERE oi.product_id = %d AND o.order_date = %s AND o.order_type = 'credit'",
+                $product_id,
+                $date
+            )
+        ));
+        
+        // 5. Not supplied from not_supplied table
+        $expected_ns = floatval($wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COALESCE(SUM(quantity), 0) FROM $table_ns WHERE product_id = %d AND record_date = %s",
+                $product_id,
+                $date
+            )
+        ));
+        
+        // 6. Supplied today from supplied_today table
+        $expected_st = floatval($wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COALESCE(SUM(quantity), 0) FROM $table_st WHERE product_id = %d AND record_date = %s",
+                $product_id,
+                $date
+            )
+        ));
+        
+        // 7. From packing store = packing store's to_sales
+        $packing_to_sales = $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT to_sales FROM $table_packing WHERE product_id = %d AND record_date = %s",
+                $product_id,
+                $date
+            )
+        );
+        $expected_from_packing = $packing_to_sales !== null ? floatval($packing_to_sales) : 0;
+        
+        // 8. to_packing_store is user-entered — keep existing value
+        $to_packing = floatval($record->to_packing_store);
+        
+        // 9. Calculate expected closing
+        $expected_closing = $expected_opening + $expected_import - $expected_cash - $expected_credit
+                          + $expected_ns - $expected_st - $to_packing + $expected_from_packing;
+        
+        // Check if any value differs from what's stored
+        $dominated = (
+            abs(floatval($record->opening)            - $expected_opening)      > 0.001 ||
+            abs(floatval($record->import_qty)         - $expected_import)       > 0.001 ||
+            abs(floatval($record->cash_supply)        - $expected_cash)         > 0.001 ||
+            abs(floatval($record->credit_supply)      - $expected_credit)       > 0.001 ||
+            abs(floatval($record->not_supplied)       - $expected_ns)           > 0.001 ||
+            abs(floatval($record->supplied_today)     - $expected_st)           > 0.001 ||
+            abs(floatval($record->from_packing_store) - $expected_from_packing) > 0.001 ||
+            abs(floatval($record->closing)            - $expected_closing)      > 0.001
+        );
+        
+        if ($dominated) {
+            $wpdb->update(
+                $table_stock,
+                array(
+                    'opening'            => $expected_opening,
+                    'import_qty'         => $expected_import,
+                    'cash_supply'        => $expected_cash,
+                    'credit_supply'      => $expected_credit,
+                    'not_supplied'       => $expected_ns,
+                    'supplied_today'     => $expected_st,
+                    'from_packing_store' => $expected_from_packing,
+                    'closing'            => $expected_closing,
+                ),
+                array('id' => $record->id),
+                array('%f', '%f', '%f', '%f', '%f', '%f', '%f', '%f'),
+                array('%d')
+            );
+            
+            // Cascade closing change to next day's opening
+            self::cascade_closing_to_next_day($product_id, $date);
+            
+            return true;
+        }
+        
+        return false;
+    }
+    
+    /**
      * Get stock records by date
      */
     public static function get_by_date($date) {
         global $wpdb;
         $table_stock = CFI_Database::get_table('stock');
-        $table_packing = CFI_Database::get_table('packing_store');
         $table_products = CFI_Database::get_table('products');
         
         // Ensure all products have stock records for this date
@@ -80,106 +232,11 @@ class CFI_Stock {
             self::initialize_product($product->id, $date);
         }
         
-        // Verify and fix opening values: ensure each product's opening matches the previous day's actual closing
-        // This prevents stale or incorrect opening values from propagating
+        // Recalculate every product's stock values from source tables.
+        // This is the safety net: even if incremental updates had bugs,
+        // loading the stock page always shows the correct values.
         foreach ($products as $product) {
-            $stock_record = $wpdb->get_row(
-                $wpdb->prepare(
-                    "SELECT * FROM $table_stock WHERE product_id = %d AND record_date = %s",
-                    $product->id,
-                    $date
-                )
-            );
-            
-            if (!$stock_record) {
-                continue;
-            }
-            
-            // Get the most recent closing value from any previous date
-            $prev_closing = $wpdb->get_var(
-                $wpdb->prepare(
-                    "SELECT closing FROM $table_stock WHERE product_id = %d AND record_date < %s ORDER BY record_date DESC LIMIT 1",
-                    $product->id,
-                    $date
-                )
-            );
-            
-            // Default to 0 if no previous record exists
-            $expected_opening = $prev_closing !== null ? floatval($prev_closing) : 0;
-            
-            // Fix opening if it doesn't match the previous closing
-            if (abs(floatval($stock_record->opening) - $expected_opening) > 0.001) {
-                $new_closing = $expected_opening + 
-                              floatval($stock_record->import_qty) - 
-                              floatval($stock_record->cash_supply) - 
-                              floatval($stock_record->credit_supply) + 
-                              floatval($stock_record->not_supplied) - 
-                              floatval($stock_record->supplied_today) - 
-                              floatval($stock_record->to_packing_store) + 
-                              floatval($stock_record->from_packing_store);
-                
-                $wpdb->update(
-                    $table_stock,
-                    array(
-                        'opening' => $expected_opening,
-                        'closing' => $new_closing
-                    ),
-                    array('id' => $stock_record->id),
-                    array('%f', '%f'),
-                    array('%d')
-                );
-            }
-        }
-        
-        // Sync from_packing_store from packing store's to_sales for ALL products
-        // This ensures the stock form always shows the correct from_packing value
-        foreach ($products as $product) {
-            // Get packing store's to_sales for this product and date
-            $packing_to_sales = $wpdb->get_var(
-                $wpdb->prepare(
-                    "SELECT to_sales FROM $table_packing WHERE product_id = %d AND record_date = %s",
-                    $product->id,
-                    $date
-                )
-            );
-            
-            $from_packing_value = $packing_to_sales !== null ? floatval($packing_to_sales) : 0;
-            
-            // Get current stock record (re-read after opening fix)
-            $stock_record = $wpdb->get_row(
-                $wpdb->prepare(
-                    "SELECT * FROM $table_stock WHERE product_id = %d AND record_date = %s",
-                    $product->id,
-                    $date
-                )
-            );
-            
-            if ($stock_record && floatval($stock_record->from_packing_store) != $from_packing_value) {
-                // Recalculate closing with the correct from_packing_store value
-                // Formula: closing = opening + import - cash - credit + not_supplied - supplied_today - to_packing + from_packing
-                $new_closing = floatval($stock_record->opening) + 
-                              floatval($stock_record->import_qty) - 
-                              floatval($stock_record->cash_supply) - 
-                              floatval($stock_record->credit_supply) + 
-                              floatval($stock_record->not_supplied) - 
-                              floatval($stock_record->supplied_today) - 
-                              floatval($stock_record->to_packing_store) + 
-                              $from_packing_value;
-                
-                $wpdb->update(
-                    $table_stock,
-                    array(
-                        'from_packing_store' => $from_packing_value,
-                        'closing' => $new_closing
-                    ),
-                    array('id' => $stock_record->id),
-                    array('%f', '%f'),
-                    array('%d')
-                );
-                
-                // Cascade the closing change to next day's opening if it exists
-                self::cascade_closing_to_next_day($product->id, $date);
-            }
+            self::recalculate_from_sources($product->id, $date);
         }
         
         $query = $wpdb->prepare(
@@ -224,9 +281,9 @@ class CFI_Stock {
             }
             
             // Calculate new closing
-            $closing = $current->opening + $current->import_qty - $current->cash_supply - 
-                       $current->credit_supply + $current->not_supplied - $current->supplied_today - 
-                       $to_packing + $current->from_packing_store;
+            $closing = floatval($current->opening) + floatval($current->import_qty) - floatval($current->cash_supply) - 
+                       floatval($current->credit_supply) + floatval($current->not_supplied) - floatval($current->supplied_today) - 
+                       $to_packing + floatval($current->from_packing_store);
             
             // Record history if value changed
             if ($to_packing != $current->to_packing_store) {
@@ -834,9 +891,9 @@ class CFI_Stock {
         }
         
         // Recalculate closing with new opening
-        $closing = $opening_value + $current->import_qty - $current->cash_supply - 
-                   $current->credit_supply + $current->not_supplied - $current->supplied_today - 
-                   $current->to_packing_store + $current->from_packing_store;
+        $closing = floatval($opening_value) + floatval($current->import_qty) - floatval($current->cash_supply) - 
+                   floatval($current->credit_supply) + floatval($current->not_supplied) - floatval($current->supplied_today) - 
+                   floatval($current->to_packing_store) + floatval($current->from_packing_store);
         
         // Update the record
         $result = $wpdb->update(
