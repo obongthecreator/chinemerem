@@ -624,10 +624,10 @@ class CFI_Ajax {
                         $stock_table,
                         array(
                             'credit_supply' => $new_credit_supply,
-                            'closing' => $stock_record->opening + $stock_record->import - $stock_record->cash_supply - $new_credit_supply + $stock_record->not_supplied - $stock_record->supplied_today - $stock_record->to_packing_store + $stock_record->from_packing_store
+                            'closing' => floatval($stock_record->opening) + floatval($stock_record->import_qty) - floatval($stock_record->cash_supply) - $new_credit_supply + floatval($stock_record->not_supplied) - floatval($stock_record->supplied_today) - floatval($stock_record->to_packing_store) + floatval($stock_record->from_packing_store)
                         ),
                         array('id' => $stock_record->id),
-                        array('%d', '%d'),
+                        array('%f', '%f'),
                         array('%d')
                     );
                 } else {
@@ -636,13 +636,16 @@ class CFI_Ajax {
                         $stock_table,
                         array(
                             'cash_supply' => $new_cash_supply,
-                            'closing' => $stock_record->opening + $stock_record->import - $new_cash_supply - $stock_record->credit_supply + $stock_record->not_supplied - $stock_record->supplied_today - $stock_record->to_packing_store + $stock_record->from_packing_store
+                            'closing' => floatval($stock_record->opening) + floatval($stock_record->import_qty) - $new_cash_supply - floatval($stock_record->credit_supply) + floatval($stock_record->not_supplied) - floatval($stock_record->supplied_today) - floatval($stock_record->to_packing_store) + floatval($stock_record->from_packing_store)
                         ),
                         array('id' => $stock_record->id),
-                        array('%d', '%d'),
+                        array('%f', '%f'),
                         array('%d')
                     );
                 }
+                
+                // Cascade closing change to next day's opening
+                CFI_Stock::cascade_closing_to_next_day($item->product_id, $order_date);
             }
         }
         

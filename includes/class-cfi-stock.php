@@ -734,7 +734,7 @@ class CFI_Stock {
      * to match, and its closing must be recalculated accordingly.
      * This prevents stale opening values from persisting after closing changes.
      */
-    private static function cascade_closing_to_next_day($product_id, $date) {
+    public static function cascade_closing_to_next_day($product_id, $date) {
         global $wpdb;
         $table = CFI_Database::get_table('stock');
         
